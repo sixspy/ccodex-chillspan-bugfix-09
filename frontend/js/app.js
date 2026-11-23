@@ -46,6 +46,10 @@ createApp({
     const lineageEdges = ref([]);
     const calibrations = ref([]);
     const routes = ref([]);
+    const scheduleBoard = ref([]);
+    const shadowBatches = ref([]);
+    const windowConflicts = ref([]);
+    const routeAdjust = ref({});
     const carrierJobs = ref([]);
     const thawJobs = ref([]);
     const dash = ref({});
@@ -79,6 +83,9 @@ createApp({
       probe_id: 1,
       cargo_ref: "试运行货载",
       batch_code: "",
+      route_id: null,
+      window_start: "",
+      window_end: "",
       points_json: '[{"t":"08:00","c":-19.1},{"t":"09:00","c":-18.9}]',
     });
     const excOpenForm = ref({ batch_id: 0, threshold: null, note: "" });
@@ -102,6 +109,8 @@ createApp({
       dest_region: "西南",
       cold_hours: 28,
       vehicle_type: "冷藏车",
+      window_start: "2026-12-10T08:00:00",
+      window_end: "2026-12-10T20:00:00",
     });
     const carrierForm = ref({ carrier_name: "顺冷物流", row_count: 80 });
     const thawForm = ref({ batch_id: null, thaw_minutes: 15 });
@@ -192,7 +201,8 @@ createApp({
       if (!token.value) return;
       clearFlash();
       try {
-        const [ch, pr, bt, ex, sl, sp, lg, cal, rt, d, cj, tj] = await Promise.all([
+        const [ch, pr, bt, ex, sl, sp, lg, cal, rt, d, cj, tj, board, sh, wcl] =
+          await Promise.all([
           api.chambers(),
           api.probes(),
           api.batches(),
@@ -205,6 +215,9 @@ createApp({
           api.dashboard(),
           api.carrierJobs(),
           api.thawJobs(),
+          api.scheduleBoard(),
+          api.shadowBatches(),
+          api.windowConflicts(),
         ]);
         chambers.value = ch.items || [];
         probes.value = pr.items || [];
@@ -218,6 +231,14 @@ createApp({
         dash.value = d || {};
         carrierJobs.value = cj.items || [];
         thawJobs.value = tj.items || [];
+        scheduleBoard.value = board.routes || [];
+        shadowBatches.value = sh.items || [];
+        windowConflicts.value = wcl.items || [];
+        for (const r of routes.value) {
+          if (!routeAdjust.value[r.id]) {
+            routeAdjust.value[r.id] = { start: "", end: "" };
+          }
+        }
 
         if (chambers.value.length && !probeForm.value.chamber_id) {
           probeForm.value.chamber_id = chambers.value[0].id;
@@ -283,22 +304,62 @@ createApp({
     }
     function selectProbe() {}
 
+    function _batchPayload() {
+      let points = [];
+      if (batchForm.value.points_json.trim()) {
+        points = JSON.parse(batchForm.value.points_json);
+      }
+      const payload = {
+        chamber_id: batchForm.value.chamber_id,
+        probe_id: batchForm.value.probe_id,
+        cargo_ref: batchForm.value.cargo_ref,
+        temp_points: points,
+      };
+      if (batchForm.value.batch_code) payload.batch_code = batchForm.value.batch_code;
+      if (batchForm.value.route_id) payload.route_id = batchForm.value.route_id;
+      if (batchForm.value.window_start) payload.window_start = batchForm.value.window_start;
+      if (batchForm.value.window_end) payload.window_end = batchForm.value.window_end;
+      return payload;
+    }
+
     async function createBatch() {
       clearFlash();
       try {
-        let points = [];
-        if (batchForm.value.points_json.trim()) {
-          points = JSON.parse(batchForm.value.points_json);
-        }
-        const payload = {
-          chamber_id: batchForm.value.chamber_id,
-          probe_id: batchForm.value.probe_id,
-          cargo_ref: batchForm.value.cargo_ref,
-          temp_points: points,
-        };
-        if (batchForm.value.batch_code) payload.batch_code = batchForm.value.batch_code;
-        const row = await api.createBatch(payload);
-        flashOk(`批次 ${row.batch_code} 已写入`);
+        const row = await api.createBatch(_batchPayload());
+        flashOk(`批次 ${row.batch_code} 已写入（正式）`);
+        await refresh();
+      } catch (e) {
+        flashErr(e);
+      }
+    }
+
+    async function createShadowIntent() {
+      clearFlash();
+      try {
+        const row = await api.shadowIntent(_batchPayload());
+        flashOk(`挤窗影子 ${row.batch_code} 已落，待改线后晋升`);
+        await refresh();
+      } catch (e) {
+        flashErr(e);
+      }
+    }
+
+    async function promoteShadow(id) {
+      clearFlash();
+      try {
+        const row = await api.promoteBatch(id);
+        flashOk(`影子整笔晋升：${row.batch_code} → ${row.status}`);
+        await refresh();
+      } catch (e) {
+        flashErr(e);
+      }
+    }
+
+    async function voidShadow(id) {
+      clearFlash();
+      try {
+        const row = await api.voidBatch(id);
+        flashOk(`挤窗意图已作废：${row.batch_code}`);
         await refresh();
       } catch (e) {
         flashErr(e);
@@ -415,8 +476,26 @@ createApp({
     async function createRoute() {
       clearFlash();
       try {
-        await api.createRoute(routeForm.value);
+        const body = { ...routeForm.value };
+        if (!body.window_start || !body.window_end) {
+          body.window_start = null;
+          body.window_end = null;
+        }
+        await api.createRoute(body);
         flashOk("线路已创建");
+        await refresh();
+      } catch (e) {
+        flashErr(e);
+      }
+    }
+
+    async function adjustRoute(id) {
+      clearFlash();
+      try {
+        const win = routeAdjust.value[id] || { start: "", end: "" };
+        if (!win.start || !win.end) throw new Error("请先填写新排程窗起止");
+        await api.adjustRoute(id, { window_start: win.start, window_end: win.end });
+        flashOk("排程窗已调整，可晋升待消冲突影子");
         await refresh();
       } catch (e) {
         flashErr(e);
@@ -467,6 +546,10 @@ createApp({
       lineageEdges,
       calibrations,
       routes,
+      scheduleBoard,
+      shadowBatches,
+      windowConflicts,
+      routeAdjust,
       carrierJobs,
       thawJobs,
       dash,
@@ -509,6 +592,9 @@ createApp({
       loadProbeDetail,
       selectProbe,
       createBatch,
+      createShadowIntent,
+      promoteShadow,
+      voidShadow,
       loadBatchDetail,
       selectBatch,
       openExcursion,
@@ -521,6 +607,7 @@ createApp({
       loadReconAll,
       addCalibration,
       createRoute,
+      adjustRoute,
       doCarrierStub,
       doThawStub,
     };

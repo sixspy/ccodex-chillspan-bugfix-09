@@ -7,9 +7,10 @@ from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
-from locks import release, require_lock
+from locks import release, try_acquire
 from models import SealIn
 from validators import require_calibration_fresh, validate_batch_sealable
+from window_svc import SHADOW_STATUS, VOID_STATUS, enrich_batch
 
 router = APIRouter(tags=["seal"])
 
@@ -19,10 +20,16 @@ def list_seals(authorization: AuthHeader = None):
     require_user(authorization)
     with connect() as conn:
         rows = conn.execute(
-            """SELECT s.*, b.batch_code FROM seal_snapshots s
+            """SELECT s.*, b.batch_code, b.route_id, b.window_start, b.window_end,
+                      b.plan_intent, b.status AS batch_status
+               FROM seal_snapshots s
                JOIN temp_batches b ON b.id=s.batch_id ORDER BY s.id DESC"""
         ).fetchall()
-        return {"items": [dict(r) for r in rows]}
+        items = []
+        for r in rows:
+            d = enrich_batch(conn, r)
+            items.append(d)
+        return {"items": items}
 
 
 @router.post("/api/seals")
@@ -30,7 +37,10 @@ def seal_batch(body: SealIn, authorization: AuthHeader = None):
     user = require_writer(authorization)
     lock_key = f"batch:{body.batch_id}"
     with connect() as conn:
-        require_lock(conn, lock_key, user)
+        if not try_acquire(conn, lock_key, user):
+            write_audit(conn, user, "seal_lock_contention", lock_key, {"ok": False})
+            conn.commit()
+            raise HTTPException(409, "争用：后到只记争用，不写业务")
         try:
             batch = conn.execute(
                 """SELECT b.*, p.calibration_due, p.probe_code
@@ -40,6 +50,10 @@ def seal_batch(body: SealIn, authorization: AuthHeader = None):
             ).fetchone()
             if not batch:
                 raise HTTPException(404, "批次不存在")
+            if batch["status"] == SHADOW_STATUS:
+                raise HTTPException(409, "挤窗影子未晋升，禁止封批")
+            if batch["status"] == VOID_STATUS:
+                raise HTTPException(409, "已作废批次禁止封批")
             open_exc = conn.execute(
                 """SELECT COUNT(*) c FROM excursion_cursors
                    WHERE batch_id=? AND status='开放'""",

@@ -17,22 +17,28 @@ class LockIn(BaseModel):
 
 def try_acquire(conn, lock_key: str, holder: str) -> bool:
     now = now_iso()
+    # 占锁必须立即落库可见：BEGIN IMMEDIATE 取库级写锁后原子 INSERT OR IGNORE，
+    # 否则两条连接各自未提交的占锁互不可见，串行化失效。
+    conn.execute("BEGIN IMMEDIATE")
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO chamber_locks(lock_key,holder,acquired_at) VALUES (?,?,?)",
+        (lock_key, holder, now),
+    )
+    if cur.rowcount == 1:
+        conn.commit()
+        return True
     row = conn.execute(
         "SELECT holder FROM chamber_locks WHERE lock_key=?", (lock_key,)
     ).fetchone()
-    if row is None:
-        conn.execute(
-            "INSERT INTO chamber_locks(lock_key,holder,acquired_at) VALUES (?,?,?)",
-            (lock_key, holder, now),
-        )
-        return True
-    if row["holder"] == holder:
+    if row is not None and row["holder"] == holder:
+        conn.commit()
         return True
     conn.execute(
         """INSERT INTO contention_log(lock_key,actor,action,detail,created_at)
            VALUES (?,?,?,?,?)""",
-        (lock_key, holder, "争用", f"持有者={row['holder']}", now),
+        (lock_key, holder, "争用", f"持有者={row['holder'] if row else '?'}", now),
     )
+    conn.commit()
     return False
 
 
@@ -41,6 +47,7 @@ def release(conn, lock_key: str, holder: str) -> None:
         "DELETE FROM chamber_locks WHERE lock_key=? AND holder=?",
         (lock_key, holder),
     )
+    conn.commit()
 
 
 def require_lock(conn, lock_key: str, holder: str) -> None:

@@ -66,6 +66,17 @@ export function createApi(getToken, onUnauthorized) {
       req("/api/calibrations", { method: "POST", body: JSON.stringify(data) }),
     routes: () => req("/api/routes"),
     createRoute: (data) => req("/api/routes", { method: "POST", body: JSON.stringify(data) }),
+    adjustRoute: (id, data) =>
+      req(`/api/routes/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+    scheduleBoard: () => req("/api/schedule-board"),
+    windowConflicts: () => req("/api/window-conflicts"),
+    shadowIntent: (data) =>
+      req("/api/batches/shadow-intent", { method: "POST", body: JSON.stringify(data) }),
+    shadowBatches: () => req("/api/batches?scope=shadow"),
+    promoteBatch: (id) =>
+      req(`/api/batches/${id}/promote`, { method: "POST", body: JSON.stringify({}) }),
+    voidBatch: (id) =>
+      req(`/api/batches/${id}/void`, { method: "POST", body: JSON.stringify({}) }),
     audit: () => req("/api/audit?limit=150"),
     contention: () => req("/api/contention"),
     locks: () => req("/api/locks"),

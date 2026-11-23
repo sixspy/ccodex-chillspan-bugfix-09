@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user, require_writer
 from db import connect, now_iso, write_audit
-from locks import release, require_lock
+from locks import release, try_acquire
 from models import ExcursionCloseIn, ExcursionOpenIn
 from validators import detect_excursion
 
@@ -34,13 +34,18 @@ def open_excursion(body: ExcursionOpenIn, authorization: AuthHeader = None):
     user = require_writer(authorization)
     lock_key = f"batch:{body.batch_id}"
     with connect() as conn:
-        require_lock(conn, lock_key, user)
+        if not try_acquire(conn, lock_key, user):
+            write_audit(conn, user, "excursion_lock_contention", lock_key, {"ok": False})
+            conn.commit()
+            raise HTTPException(409, "争用：后到只记争用，不写业务")
         try:
             batch = conn.execute(
                 "SELECT * FROM temp_batches WHERE id=?", (body.batch_id,)
             ).fetchone()
             if not batch:
                 raise HTTPException(404, "批次不存在")
+            if batch["status"] == "影子":
+                raise HTTPException(409, "挤窗影子未晋升，禁止开游标")
             if batch["status"] == "已封批":
                 raise HTTPException(409, "已封批禁止开游标")
             open_n = conn.execute(

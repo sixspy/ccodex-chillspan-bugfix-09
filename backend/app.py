@@ -22,6 +22,7 @@ from route_plan_svc import router as routes_router
 from seal_svc import router as seal_router
 from spectrum_svc import router as spectrum_router
 from thaw_event_svc import router as thaw_router
+from window_svc import router as window_router
 
 PRODUCT = "冷链温谱管道"
 SKELETON = PRODUCT_META["skeleton"]
@@ -51,6 +52,7 @@ for r in (
     routes_router,
     carrier_router,
     thaw_router,
+    window_router,
 ):
     app.include_router(r)
 

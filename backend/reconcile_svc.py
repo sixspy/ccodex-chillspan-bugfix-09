@@ -1,10 +1,14 @@
-"""仓间配额 vs 在批差额对账 + 互证只读。"""
+"""仓间配额 vs 在批差额对账 + 互证只读。
+
+窗状态与批次建口同源（window_svc）；影子意图不占在批配额。
+"""
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
 from auth import AuthHeader, require_user
 from db import connect
+from window_svc import ACTIVE_SQL, enrich_batch
 
 router = APIRouter(tags=["reconcile"])
 
@@ -13,8 +17,7 @@ def _chamber_recon(conn, chamber) -> dict:
     cid = chamber["id"]
     quota = int(chamber["quota_batches"])
     active = conn.execute(
-        """SELECT COUNT(*) c FROM temp_batches
-           WHERE chamber_id=? AND status NOT IN ('已封批','作废')""",
+        f"SELECT COUNT(*) c FROM temp_batches WHERE chamber_id=? AND {ACTIVE_SQL}",
         (cid,),
     ).fetchone()["c"]
     sealed = conn.execute(
@@ -22,6 +25,19 @@ def _chamber_recon(conn, chamber) -> dict:
            WHERE chamber_id=? AND status='已封批'""",
         (cid,),
     ).fetchone()["c"]
+    shadow = conn.execute(
+        "SELECT COUNT(*) c FROM temp_batches WHERE chamber_id=? AND status='影子'",
+        (cid,),
+    ).fetchone()["c"]
+    conflict_rows = conn.execute(
+        """SELECT b.* FROM temp_batches b WHERE b.chamber_id=?
+           AND b.status NOT IN ('作废') ORDER BY b.id""",
+        (cid,),
+    ).fetchall()
+    window_conflicts = [
+        b["batch_code"] for b in (enrich_batch(conn, r) for r in conflict_rows)
+        if b["window_conflict"]
+    ]
     gap = quota - active
     ok = active <= quota
     return {
@@ -31,12 +47,16 @@ def _chamber_recon(conn, chamber) -> dict:
         "quota_batches": quota,
         "active_batches": active,
         "sealed_batches": sealed,
+        "shadow_pending": shadow,
         "quota_left": gap,
         "balanced": ok,
+        "window_conflict_codes": window_conflicts,
+        "window_conflict": bool(window_conflicts),
         "proof": {
-            "formula": "active_batches <= quota_batches",
+            "formula": "active_batches <= quota_batches and no window conflict",
             "left": active,
             "right": quota,
+            "window_conflict_batches": window_conflicts,
         },
     }
 
@@ -92,19 +112,26 @@ def batch_proof(batch_code: str, authorization: AuthHeader = None):
         ).fetchone()["c"]
         sealed = batch["status"] == "已封批"
         spectrum_ok = (exports >= 1) if sealed else True
+        bdict = enrich_batch(conn, batch)
         return {
             "batch_code": batch_code,
             "status": batch["status"],
             "generation": batch["generation"],
+            "plan_intent": batch["plan_intent"],
+            "route_id": batch["route_id"],
+            "window_start": batch["window_start"],
+            "window_end": batch["window_end"],
+            "window_conflict": bdict["window_conflict"],
             "open_excursions": open_exc,
             "spectrum_exports": exports,
             "sealed": sealed,
             "excursion_closed": open_exc == 0,
             "spectrum_matches_seal": spectrum_ok,
             "proof": {
-                "formula": "sealed => spectrum>=1 and open_excursions==0",
+                "formula": "sealed => spectrum>=1 and open_excursions==0 and no window conflict",
                 "sealed": sealed,
                 "open_excursions": open_exc,
                 "exports": exports,
+                "window_conflict": bdict["window_conflict"],
             },
         }

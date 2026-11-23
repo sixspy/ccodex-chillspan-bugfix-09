@@ -46,7 +46,7 @@ def get_chamber(chamber_id: int, authorization: AuthHeader = None):
         ).fetchall()
         active = conn.execute(
             """SELECT COUNT(*) c FROM temp_batches
-               WHERE chamber_id=? AND status NOT IN ('已封批','作废')""",
+               WHERE chamber_id=? AND status NOT IN ('已封批','作废','影子')""",
             (chamber_id,),
         ).fetchone()["c"]
         return {

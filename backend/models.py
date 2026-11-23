@@ -26,6 +26,9 @@ class BatchIn(BaseModel):
     probe_id: int
     cargo_ref: str
     temp_points: list[dict] = Field(default_factory=list)
+    route_id: int | None = None
+    window_start: str | None = None
+    window_end: str | None = None
 
 
 class ExcursionOpenIn(BaseModel):
@@ -68,6 +71,13 @@ class RouteIn(BaseModel):
     dest_region: str
     cold_hours: float = Field(gt=0)
     vehicle_type: str = "冷藏车"
+    window_start: str | None = None
+    window_end: str | None = None
+
+
+class RouteAdjustIn(BaseModel):
+    window_start: str
+    window_end: str
 
 
 class CarrierStubIn(BaseModel):

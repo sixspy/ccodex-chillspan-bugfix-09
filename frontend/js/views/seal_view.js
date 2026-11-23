@@ -10,12 +10,14 @@ export const sealViewTemplate = `
   </div>
   <div class="actions"><button @click="doSeal">执行封批</button></div>
   <table class="data-table">
-    <thead><tr><th>批次</th><th>代</th><th>封批时间</th><th>附言摘要</th></tr></thead>
+    <thead><tr><th>批次</th><th>代</th><th>意图</th><th>封批时间</th><th>窗状态</th><th>附言摘要</th></tr></thead>
     <tbody>
       <tr v-for="s in seals" :key="s.id">
         <td>{{ s.batch_code }}</td>
         <td>{{ s.batch_generation }}</td>
+        <td>{{ s.plan_intent }}</td>
         <td>{{ s.sealed_at }}</td>
+        <td><span v-if="s.route_id" class="badge" :class="s.window_conflict ? 'fail' : 'pass'">{{ s.window_conflict ? "撞车" : "无撞" }}</span><span v-else class="hint">未挂线</span></td>
         <td>{{ shortText(s.manifest) }}</td>
       </tr>
     </tbody>

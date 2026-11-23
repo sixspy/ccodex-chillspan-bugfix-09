@@ -91,8 +91,15 @@ CREATE TABLE IF NOT EXISTS temp_batches(
   max_observed REAL,
   created_at TEXT NOT NULL,
   sealed_at TEXT,
+  route_id INTEGER,
+  window_start TEXT,
+  window_end TEXT,
+  plan_intent TEXT NOT NULL DEFAULT '正式',
+  promoted_from INTEGER,
+  voided_at TEXT,
   FOREIGN KEY(chamber_id) REFERENCES cold_chambers(id),
-  FOREIGN KEY(probe_id) REFERENCES probes(id)
+  FOREIGN KEY(probe_id) REFERENCES probes(id),
+  FOREIGN KEY(route_id) REFERENCES route_plans(id)
 );
 CREATE TABLE IF NOT EXISTS excursion_cursors(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -152,6 +159,8 @@ CREATE TABLE IF NOT EXISTS route_plans(
   cold_hours REAL NOT NULL,
   vehicle_type TEXT NOT NULL,
   status TEXT NOT NULL,
+  window_start TEXT,
+  window_end TEXT,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS chamber_locks(
@@ -190,6 +199,16 @@ CREATE TABLE IF NOT EXISTS thaw_event_jobs(
   thaw_minutes INTEGER NOT NULL,
   mode TEXT NOT NULL,
   status TEXT NOT NULL,
+  detail TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS window_conflict_log(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  route_id INTEGER,
+  route_code TEXT NOT NULL,
+  batch_code TEXT NOT NULL,
+  chamber_id INTEGER,
+  decision TEXT NOT NULL,
   detail TEXT,
   created_at TEXT NOT NULL
 );
@@ -363,7 +382,8 @@ def seed_routes(conn: sqlite3.Connection) -> None:
             continue
         conn.execute(
             """INSERT INTO route_plans(route_code,origin_region,dest_region,cold_hours,
-               vehicle_type,status,created_at) VALUES (?,?,?,?,?,?,?)""",
+               vehicle_type,status,window_start,window_end,created_at)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (
                 row["route_code"],
                 row["origin_region"],
@@ -371,6 +391,8 @@ def seed_routes(conn: sqlite3.Connection) -> None:
                 float(row["cold_hours"]),
                 row.get("vehicle_type", "冷藏车"),
                 row.get("status", "启用"),
+                row.get("window_start"),
+                row.get("window_end"),
                 row.get("created_at", now_iso()),
             ),
         )
@@ -398,9 +420,35 @@ def seed_lineage_samples(conn: sqlite3.Connection) -> None:
     )
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """对既有库做加列迁移；新库 SCHEMA 已含全部列。"""
+    route_cols = _table_columns(conn, "route_plans")
+    if "window_start" not in route_cols:
+        conn.execute("ALTER TABLE route_plans ADD COLUMN window_start TEXT")
+    if "window_end" not in route_cols:
+        conn.execute("ALTER TABLE route_plans ADD COLUMN window_end TEXT")
+    batch_cols = _table_columns(conn, "temp_batches")
+    for ddl in (
+        "ALTER TABLE temp_batches ADD COLUMN route_id INTEGER",
+        "ALTER TABLE temp_batches ADD COLUMN window_start TEXT",
+        "ALTER TABLE temp_batches ADD COLUMN window_end TEXT",
+        "ALTER TABLE temp_batches ADD COLUMN plan_intent TEXT NOT NULL DEFAULT '正式'",
+        "ALTER TABLE temp_batches ADD COLUMN promoted_from INTEGER",
+        "ALTER TABLE temp_batches ADD COLUMN voided_at TEXT",
+    ):
+        col = ddl.split("ADD COLUMN")[1].strip().split()[0]
+        if col not in batch_cols:
+            conn.execute(ddl)
+
+
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         seed_users(conn)
         seed_chambers(conn)
         seed_probes(conn)
@@ -416,6 +464,9 @@ def dashboard_stats(conn: sqlite3.Connection) -> dict:
     chambers = conn.execute("SELECT COUNT(*) c FROM cold_chambers").fetchone()["c"]
     probes = conn.execute("SELECT COUNT(*) c FROM probes").fetchone()["c"]
     batches = conn.execute("SELECT COUNT(*) c FROM temp_batches").fetchone()["c"]
+    shadow_pending = conn.execute(
+        "SELECT COUNT(*) c FROM temp_batches WHERE status='影子'"
+    ).fetchone()["c"]
     open_exc = conn.execute(
         "SELECT COUNT(*) c FROM excursion_cursors WHERE status='开放'"
     ).fetchone()["c"]
@@ -446,5 +497,6 @@ def dashboard_stats(conn: sqlite3.Connection) -> dict:
         "spectrum_exports": exports,
         "calibration_overdue": overdue,
         "stubs": stubs,
+        "shadow_pending": shadow_pending,
         "meta": PRODUCT_META,
     }
